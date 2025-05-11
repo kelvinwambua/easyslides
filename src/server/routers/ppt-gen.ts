@@ -1,0 +1,542 @@
+
+import { z } from "zod"
+import { j, publicProcedure } from "../jstack"
+import { GoogleGenerativeAI } from "@google/generative-ai"
+import PptxGenJS from "pptxgenjs"
+import handlebars from 'handlebars'
+
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "AIzaSyDRgXbCEQ1-K-f3rmmHtCZifxY8fgrzEgc");
+
+
+const COLOR_SCHEMES = {
+  professional: {
+    primary: "0070C0",     // Blue
+    secondary: "404040",    // Dark Gray
+    accent: "00B050",       // Green
+    background: "FFFFFF",   // White
+    text: "333333"          // Near Black
+  },
+  creative: {
+    primary: "7030A0",      // Purple
+    secondary: "FFC000",    // Gold
+    accent: "FF5050",       // Coral
+    background: "F5F5F5",   // Light Gray
+    text: "333333"          // Near Black
+  },
+  corporate: {
+    primary: "203864",      // Navy Blue
+    secondary: "4472C4",    // Medium Blue
+    accent: "70AD47",       // Green
+    background: "FFFFFF",   // White
+    text: "333333"          // Near Black
+  },
+  modern: {
+    primary: "2F5597",      // Dark Blue
+    secondary: "ED7D31",    // Orange
+    accent: "5B9BD5",       // Light Blue
+    background: "FFFFFF",   // White
+    text: "333333"          // Near Black
+  },
+  dark: {
+    primary: "252525",      // Near Black
+    secondary: "C00000",    // Red
+    accent: "7F7F7F",       // Gray
+    background: "1F1F1F",   // Dark Gray
+    text: "F2F2F2"          // Near White
+  }
+};
+
+
+function extractJsonFromText(text: string): any {
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+
+    const jsonRegex = /```(?:json)?\s*(\{[\s\S]*?\})\s*```/;
+    const match = text.match(jsonRegex);
+    
+    if (match && match[1]) {
+      try {
+        return JSON.parse(match[1]);
+      } catch (innerError) {
+        console.error("Failed to parse extracted JSON:", innerError);
+      }
+    }
+    
+    throw new Error("Failed to parse AI response as JSON");
+  }
+}
+
+function generateMockSlideData(prompt: string, slideCount: number) {
+  const topics = [
+    "Introduction", "Overview", "Key Points", "Benefits", 
+    "Challenges", "Solutions", "Implementation", "Case Study", 
+    "Statistics", "Market Analysis", "Competitors", "Future Trends", 
+    "Action Items", "Timeline", "Budget", "Conclusion"
+  ];
+  
+  return {
+    title: `Presentation: ${prompt}`,
+    theme: "professional",
+    slideType: "varied",
+    slides: Array.from({ length: Math.min(slideCount, topics.length) }, (_, i) => ({
+      title: topics[i],
+      type: i % 5 === 0 ? "section" : 
+            i % 4 === 0 ? "image" : 
+            i % 3 === 0 ? "chart" : 
+            i % 2 === 0 ? "comparison" : "standard",
+      content: [
+        `This is the first point about ${topics[i].toLowerCase()}`,
+        `Another important aspect to consider`,
+        `Final thoughts on this topic`
+      ],
+      notes: `Speaker notes for the ${topics[i].toLowerCase()} slide`,
+      chartData: i % 3 === 0 ? {
+        type: "bar",
+        labels: ["Category A", "Category B", "Category C", "Category D"],
+        values: [4.3, 2.5, 3.5, 4.5]
+      } : null,
+      comparisonData: i % 2 === 0 ? {
+        left: ["Benefit 1", "Benefit 2", "Benefit 3"],
+        right: ["Challenge 1", "Challenge 2", "Challenge 3"]
+      } : null
+    }))
+  };
+}
+
+export const slidesRouter = j.router({
+  generateFromPrompt: publicProcedure
+    .input(z.object({ 
+      prompt: z.string().min(1),
+      slideCount: z.number().optional().default(5),
+      author: z.string().optional(),
+      company: z.string().optional(),
+      contactEmail: z.string().optional(),
+      layout: z.string().optional()
+    }))
+    .mutation(async ({ c, input }) => {
+      const { prompt, slideCount, author, company, contactEmail } = input;
+      
+      try {
+    
+        let slideData;
+        let usedMockData = false;
+        
+        try {
+          const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+          
+          const geminiPrompt = `Create ${slideCount} professional presentation slides about: "${prompt}".
+          Return ONLY the content in JSON format with this exact structure, with no explanations or comments:
+          {
+            "title": "Overall Presentation Title",
+            "theme": "Choose one theme: professional, creative, corporate, modern, dark",
+            "slideType": "varied", 
+            "slides": [
+              {
+                "title": "Slide 1 Title",
+                "type": "Choose appropriate type for content: standard, section, chart, comparison, image",
+                "content": ["Bullet point 1", "Bullet point 2", "Bullet point 3"],
+                "notes": "Speaker notes for this slide",
+                "chartData": {
+                  "type": "bar/pie/line",
+                  "labels": ["Label 1", "Label 2", "Label 3", "Label 4"],
+                  "values": [4.3, 2.5, 3.5, 4.5]
+                },
+                "comparisonData": {
+                  "left": ["Left point 1", "Left point 2", "Left point 3"],
+                  "right": ["Right point 1", "Right point 2", "Right point 3"]
+                }
+              },
+              ...more slides (total slides should be ${slideCount})
+            ]
+          }
+          
+          Only include chartData for slides with type "chart", and only include comparisonData for slides with type "comparison".
+          Make content insightful and professional, with a mix of slide types for visual interest.`;
+          
+          const result = await model.generateContent(geminiPrompt);
+          const response = await result.response;
+          const text = response.text();
+          
+          
+          slideData = extractJsonFromText(text);
+        } catch (apiError) {
+          console.warn("Failed to get or parse AI response:", apiError);
+          slideData = generateMockSlideData(prompt, slideCount);
+          usedMockData = true;
+        }
+        
+        
+        const colors = COLOR_SCHEMES[slideData.theme] || COLOR_SCHEMES.professional;
+        
+        
+        const pres = new PptxGenJS();
+        pres.title = slideData.title;
+        pres.subject = `Presentation about ${prompt}`;
+        pres.author = author || "Presentation Generator";
+        pres.company = company || "Your Company Name";
+        
+        
+        pres.defineSlideMaster({
+          title: "TITLE_SLIDE",
+          background: { color: colors.background },
+          objects: [
+            { rect: { x: 0, y: 2.5, w: "100%", h: 1.5, fill: { color: colors.primary } } },
+            
+            { placeholder: {
+              options: { name: "title", type: "title", x: 0.5, y: 1.3, w: 9, h: 1, align: "center" },
+              text: "Presentation Title", 
+            }},
+            
+   
+            { placeholder: {
+              options: { name: "subtitle", type: "body", x: 0.5, y: 2.7, w: 9, h: 0.8, align: "center", color: colors.background },
+              text: "Subtitle goes here",
+            }},
+            
+      
+            { text: {
+              text: new Date().toLocaleDateString(),
+              options: { x: 0.5, y: 4.8, w: 9, h: 0.3, align: "center", color: colors.secondary }
+            }}
+          ]
+        });
+        
+ 
+        pres.defineSlideMaster({
+          title: "CONTENT_SLIDE",
+          background: { color: colors.background },
+          objects: [
+          
+            { rect: { x: 0, y: 0, w: "100%", h: 0.5, fill: { color: colors.primary } } },
+            
+         
+            { placeholder: {
+              options: { name: "title", type: "title", x: 0.5, y: 0.65, w: 9, h: 0.8 },
+              text: "Slide Title",
+            }},
+            
+      
+            { placeholder: {
+              options: { name: "content", type: "body", x: 0.5, y: 1.5, w: 9, h: 4 },
+              text: "(content)",
+            }},
+            
+        
+            { rect: { x: 0, y: 5.6, w: "100%", h: 0.3, fill: { color: colors.primary } } },
+            { text: {
+              text: "Slide {slideNum} of {totalSlides}",
+              options: { x: 9, y: 5.65, w: 1, h: 0.2, align: "right", color: colors.background, fontSize: 10 }
+            }}
+          ]
+        });
+        
+
+        pres.defineSlideMaster({
+          title: "SECTION_SLIDE",
+          background: { color: colors.primary },
+          objects: [
+            // Large dramatic title - RevealJS style
+            { placeholder: {
+              options: { name: "title", type: "title", x: 0.5, y: 2.2, w: 9, h: 1.5, align: "center", color: colors.background, fontSize: 54 },
+              text: "Section Title",
+            }}
+          ]
+        });
+        
+        pres.defineSlideMaster({
+          title: "TWO_COLUMN_SLIDE",
+          background: { color: colors.background },
+          objects: [
+
+            { rect: { x: 0, y: 0, w: "100%", h: 0.5, fill: { color: colors.primary } } },
+  
+            { placeholder: {
+              options: { name: "title", type: "title", x: 0.5, y: 0.65, w: 9, h: 0.8 },
+              text: "Comparison",
+            }},
+            
+
+            { placeholder: {
+              options: { name: "leftTitle", type: "title", x: 0.5, y: 1.5, w: 4.25, h: 0.4, fontSize: 18, color: colors.primary },
+              text: "Left Column",
+            }},
+            { placeholder: {
+              options: { name: "rightTitle", type: "title", x: 5.25, y: 1.5, w: 4.25, h: 0.4, fontSize: 18, color: colors.secondary },
+              text: "Right Column",  
+            }},
+ 
+            { placeholder: {
+              options: { name: "leftContent", type: "body", x: 0.5, y: 2, w: 4.25, h: 3.2 },
+              text: "(left column)",
+            }},
+            
+            { placeholder: {
+              options: { name: "rightContent", type: "body", x: 5.25, y: 2, w: 4.25, h: 3.2 },
+              text: "(right column)",
+            }},
+            { rect: { x: 0, y: 5.6, w: "100%", h: 0.3, fill: { color: colors.primary } } },
+            { text: {
+              text: "Slide {slideNum} of {totalSlides}",
+              options: { x: 9, y: 5.65, w: 1, h: 0.2, align: "right", color: colors.background, fontSize: 10 }
+            }}
+          ]
+        });
+        
+        pres.defineSlideMaster({
+          title: "CHART_SLIDE",
+          background: { color: colors.background },
+          objects: [
+            { rect: { x: 0, y: 0, w: "100%", h: 0.5, fill: { color: colors.primary } } },
+
+            { placeholder: {
+              options: { name: "title", type: "title", x: 0.5, y: 0.65, w: 9, h: 0.8 },
+              text: "Chart Title",
+            }},
+            
+            // Chart placeholder
+            { placeholder: {
+              options: { name: "chart", type: "chart", x: 1.5, y: 1.5, w: 7, h: 3.5 },
+            }},
+            { rect: { x: 0, y: 5.6, w: "100%", h: 0.3, fill: { color: colors.primary } } },
+            { text: {
+              text: "Slide {slideNum} of {totalSlides}",
+              options: { x: 9, y: 5.65, w: 1, h: 0.2, align: "right", color: colors.background, fontSize: 10 }
+            }}
+          ]
+        });
+        
+        pres.defineSlideMaster({
+          title: "IMAGE_SLIDE",
+          background: { color: colors.background },
+          objects: [
+            { rect: { x: 0, y: 0, w: "100%", h: 0.5, fill: { color: colors.primary } } },
+            
+            { placeholder: {
+              options: { name: "title", type: "title", x: 0.5, y: 0.65, w: 9, h: 0.8 },
+              text: "Visual Information",
+            }},
+            
+            { placeholder: {
+              options: { name: "image", type: "image", x: 1.5, y: 1.5, w: 7, h: 3.5 },
+            }},
+            { placeholder: {
+              options: { name: "caption", type: "body", x: 1.5, y: 5, w: 7, h: 0.4, align: "center", italic: true, fontSize: 12 },
+              text: "(image caption)",
+            }},
+            { rect: { x: 0, y: 5.6, w: "100%", h: 0.3, fill: { color: colors.primary } } },
+            { text: {
+              text: "Slide {slideNum} of {totalSlides}",
+              options: { x: 9, y: 5.65, w: 1, h: 0.2, align: "right", color: colors.background, fontSize: 10 }
+            }}
+          ]
+        });
+        const titleSlide = pres.addSlide({ masterName: "TITLE_SLIDE" });
+        titleSlide.addText(slideData.title, { placeholder: "title", color: colors.text, fontSize: 36, bold: true });
+        titleSlide.addText(`Created on ${new Date().toLocaleDateString()}`, { 
+          placeholder: "subtitle", 
+          color: colors.background,
+          fontSize: 20 
+        });
+        
+        slideData.slides.forEach((slide, index) => {
+          let newSlide;
+          
+          switch(slide.type?.toLowerCase()) {
+            case "section":
+
+              newSlide = pres.addSlide({ masterName: "SECTION_SLIDE" });
+              newSlide.addText(slide.title, { placeholder: "title" });
+              break;
+              
+            case "chart":
+              newSlide = pres.addSlide({ masterName: "CHART_SLIDE" });
+              newSlide.addText(slide.title, { placeholder: "title", color: colors.text });
+              
+              if (slide.chartData) {
+                const chartType = slide.chartData.type || "bar";
+                const chartData = [];
+                
+                slide.chartData.labels.forEach((label, i) => {
+                  chartData.push({
+                    name: label,
+                    labels: [label],
+                    values: [slide.chartData.values[i] || Math.random() * 5]
+                  });
+                });
+                
+                // Add chart - RevealJS style with clean modern look
+                newSlide.addChart(
+                  pres.ChartType[chartType === "pie" ? "PIE" : chartType === "line" ? "LINE" : "BAR"], 
+                  chartData, 
+                  { 
+                    x: 1.5, y: 1.5, w: 7, h: 3.5,
+                    chartColors: [colors.primary, colors.secondary, colors.accent, "#70AD47", "#5B9BD5"],
+                    showLegend: true,
+                    legendPos: 'b',
+                    fontSize: 12,
+                    dataLabelColor: colors.text,
+                    dataLabelFontSize: 11,
+                    shadow: { type: 'subtle' }
+                  }
+                );
+              }
+              
+              // Add notes if available
+              if (slide.notes) {
+                newSlide.addNotes(slide.notes);
+              }
+              break;
+              
+            case "comparison":
+
+              newSlide = pres.addSlide({ masterName: "TWO_COLUMN_SLIDE" });
+              newSlide.addText(slide.title, { placeholder: "title", color: colors.text });
+              newSlide.addText(slide.comparisonData ? "Pros / Benefits" : "Group A", 
+                { placeholder: "leftTitle", color: colors.primary, bold: true });
+              newSlide.addText(slide.comparisonData ? "Cons / Challenges" : "Group B", 
+                { placeholder: "rightTitle", color: colors.secondary, bold: true });
+              
+              if (slide.comparisonData && slide.comparisonData.left) {
+                newSlide.addText(
+                  slide.comparisonData.left.map(point => ({ 
+                    text: point, 
+                    options: { bullet: { type: "bullet" }, color: colors.text } 
+                  })), 
+                  { placeholder: "leftContent", fontSize: 16 }
+                );
+              } else if (slide.content && slide.content.length > 0) {
+                const midPoint = Math.ceil(slide.content.length / 2);
+                newSlide.addText(
+                  slide.content.slice(0, midPoint).map(point => ({ 
+                    text: point, 
+                    options: { bullet: { type: "bullet" }, color: colors.text } 
+                  })), 
+                  { placeholder: "leftContent", fontSize: 16 }
+                );
+              }
+              
+              if (slide.comparisonData && slide.comparisonData.right) {
+                newSlide.addText(
+                  slide.comparisonData.right.map(point => ({ 
+                    text: point, 
+                    options: { bullet: { type: "bullet" }, color: colors.text } 
+                  })), 
+                  { placeholder: "rightContent", fontSize: 16 }
+                );
+              } else if (slide.content && slide.content.length > 0) {
+                const midPoint = Math.ceil(slide.content.length / 2);
+                newSlide.addText(
+                  slide.content.slice(midPoint).map(point => ({ 
+                    text: point, 
+                    options: { bullet: { type: "bullet" }, color: colors.text } 
+                  })), 
+                  { placeholder: "rightContent", fontSize: 16 }
+                );
+              }
+              if (slide.notes) {
+                newSlide.addNotes(slide.notes);
+              }
+              break;
+              
+            case "image":
+              newSlide = pres.addSlide({ masterName: "IMAGE_SLIDE" });
+              newSlide.addText(slide.title, { placeholder: "title", color: colors.text });
+              
+              try {
+                newSlide.addImage({ 
+                  path: `https://source.unsplash.com/featured/800x600/?${encodeURIComponent(slide.title)}`,
+                  placeholder: "image",
+                  sizing: { type: "contain" }
+                });
+              } catch (imgErr) {
+                newSlide.addShape(pres.ShapeType.RECTANGLE, { 
+                  x: 1.5, y: 1.5, w: 7, h: 3.5, 
+                  fill: { color: colors.secondary + '33' },
+                  line: { color: colors.secondary, width: 1 }
+                });
+                newSlide.addText("Image placeholder", { 
+                  x: 1.5, y: 3, w: 7, h: 0.5, 
+                  align: "center", 
+                  color: colors.secondary 
+                });
+              }
+              
+              // Add caption
+              newSlide.addText(slide.content?.[0] || "Visual representation", { 
+                placeholder: "caption", 
+                color: colors.secondary
+              });
+              
+              if (slide.notes) {
+                newSlide.addNotes(slide.notes);
+              }
+              break;
+              
+            case "standard":
+            default:
+              newSlide = pres.addSlide({ masterName: "CONTENT_SLIDE" });
+              newSlide.addText(slide.title, { placeholder: "title", color: colors.text });
+              
+       
+              if (slide.content && slide.content.length > 0) {
+                newSlide.addText(
+                  slide.content.map(point => ({ 
+                    text: point, 
+                    options: { 
+                      bullet: { type: "bullet" }, 
+                      color: colors.text,
+                      breakLine: true,
+                      paraSpaceAfter: 12
+                    } 
+                  })), 
+                  { placeholder: "content", fontSize: 18 }
+                );
+              }
+              
+        
+              if (slide.notes) {
+                newSlide.addNotes(slide.notes);
+              }
+              break;
+          }
+        });
+        
+       
+        const closingSlide = pres.addSlide({ masterName: "CONTENT_SLIDE" });
+        closingSlide.addText("Thank You", { placeholder: "title", color: colors.text });
+        
+       
+        closingSlide.addText([
+          { text: "Questions?", options: { fontSize: 36, bold: true, color: colors.primary, align: "center", breakLine: true } },
+          { text: "", options: { breakLine: true } },
+          { text: "Contact Information:", options: { fontSize: 18, bold: true, color: colors.text, breakLine: true } },
+          { text: contactEmail || "contact@example.com", options: { fontSize: 16, color: colors.secondary, hyperlink: { url: `mailto:${contactEmail || "contact@example.com"}` } } },
+        ], { placeholder: "content", align: "center" });
+        
+   
+        const pptxBase64 = await pres.write({ outputType: 'base64' });
+        
+        return c.json({
+          success: true,
+          message: "Presentation created successfully",
+          data: {
+            presentation: pptxBase64,
+            format: "pptx",
+            filename: `${prompt.substring(0, 30).replace(/[^a-zA-Z0-9]/g, '_')}.pptx`,
+            slideCount: slideData.slides.length + 2, // +2 for title and closing slides
+            usedMockData
+          }
+        });
+        
+      } catch (error) {
+        console.error("Error generating presentation:", error);
+        return c.json({
+          success: false,
+          message: `Failed to generate presentation: ${error.message}`,
+          error: error.message
+        }, 500);
+      }
+    }),
+})
