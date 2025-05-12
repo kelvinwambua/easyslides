@@ -6,5 +6,5 @@ import { createClient } from "jstack"
  * @see https://jstack.app/docs/backend/api-client
  */
 export const client = createClient<AppRouter>({
-  baseUrl: "https://slides.wambua.me/api",
+  baseUrl: "http://localhost:3000/api",
 })
